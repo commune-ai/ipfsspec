@@ -15,3 +15,12 @@ test_ipfs:
 
 local_jupyter:
 	source env/bin/activate; jupyter lab
+
+bash: 
+	docker exec -it ${arg} bash
+
+app:
+	docker exec -it backend bash -c " streamlit run ipfsspec/asyn.py"
+
+run:
+	docker exec -it backend bash -c "python ipfsspec/asyn.py "

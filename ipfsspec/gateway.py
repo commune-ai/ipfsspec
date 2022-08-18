@@ -214,10 +214,10 @@ class AsyncIPFSGateway:
         
         return path
     
-    async def cat(self, session, path):
+    async def cat(self, session, path, **kwargs):
         
         path = await self.resolve_mfs_path(session=session, path=path)        
-        res = await self.api_get(endpoint='cat', session=session, arg=path)
+        res = await self.api_get(endpoint='cat', session=session, arg=path, **kwargs)
 
         async with res:
             self._raise_not_found_for_status(res, path)
@@ -247,8 +247,6 @@ class AsyncIPFSGateway:
         kwargs['params'] = dict(arg=cid, recursive= recursive,progress= progress)
         res = await self.api_post(endpoint='dag/get', session=session , **kwargs)
         return bool(cid in pinned_cid_list)
-
-
 
     async def cp(self, session,  **kwargs):
         

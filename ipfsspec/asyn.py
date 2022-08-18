@@ -8,8 +8,9 @@ from fsspec.asyn import _run_coros_in_chunks
 from fsspec.utils import is_exception
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from glob import has_magic
-from .buffered_file import IPFSBufferedFile
+# from .buffered_file import IPFSBufferedFile
 import json
+import tempfile 
 from copy import deepcopy
 from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
 from ipfshttpclient.multipart import stream_directory, stream_files #needed to prepare files/directory to be sent through http
@@ -18,48 +19,29 @@ from fsspec.exceptions import FSTimeoutError
 from fsspec.implementations.local import LocalFileSystem
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import is_exception, other_paths
-from .gateway import MultiGateway, AsyncIPFSGateway
-from .utils import dict_get, dict_put, dict_hash,dict_equal
+from fsspec.implementations.local import make_path_posix
 
+# import sys,os
+# sys.path.append(os.getenv('PWD'))
+from ipfsspec.gateway import MultiGateway, AsyncIPFSGateway
+from ipfsspec.utils import dict_get, dict_put, dict_hash,dict_equal
+import streamlit as st
 import logging
 
 logger = logging.getLogger("ipfsspec")
 
 
-class RequestsTooQuick(OSError):
-    def __init__(self, retry_after=None):
-        self.retry_after = retry_after
-
 DEFAULT_GATEWAY = None
 
 import requests
 from requests.exceptions import HTTPError
-    
-class AsyncRequestSession: # this function is not used anywhere?
-    def __init__(self, loop=None, 
-                adapter=dict(pool_connections=100, pool_maxsize=100), 
-                **kwargs):
-                
-        self.session = requests.Session()
-        self.loop = loop
-        adapter = requests.adapters.HTTPAdapter(**adapter)
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-
-    async def get(self, *args, **kwargs):
-        return await self.loop.run_in_executor(None, lambda x: self.session.get(*args,**kwargs), None)
-    
-    async def post(self, *args, **kwargs):
-        return await self.loop.run_in_executor(None, lambda x: self.session.post(*args, **kwargs), None)
-
-    async def close(self):
-        pass
 
 IPFSHTTP_LOCAL_HOST = os.getenv('IPFSHTTP_LOCAL_HOST', '127.0.0.1')
 
+
 GATEWAY_MAP = {
-    'local': [f"http://{IPFSHTTP_LOCAL_HOST}:8080"],
-    # 'infura': ['https://ipfs.infura.io:5001'],
+    'infura': ['https://ipfs.infura.io:5001'],
+    'local': [f'http://{IPFSHTTP_LOCAL_HOST}:8080'],
     'public': ["https://ipfs.io",
                "https://gateway.pinata.cloud",
                "https://cloudflare-ipfs.com",
@@ -75,6 +57,7 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
                  gateway_type='local',
                 loop=None, 
                 root = None,
+                
                 client_kwargs={},
                  **storage_options):
         super().__init__(self, asynchronous=asynchronous, loop=loop, **storage_options,)
@@ -88,7 +71,7 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
             self.root = root
 
         if not asynchronous:
-            sync(self.loop, self.set_session)
+            sync(self.loop, self.set_session, timeout=3600)
 
     @property
     def change_gateway_type(self):
@@ -263,6 +246,12 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
     is_pinned = sync_wrapper(_is_pinned)
 
 
+    async def _ls_pinned(self):
+        session = await self.set_session()
+        res = await self.gateway.api_post(endpoint='pin/ls', session=session, params={})
+
+    ls_pinned = sync_wrapper(_ls_pinned)
+
     async def _pin(self, cid, recursive=False, progress=False):
         session = await self.set_session()
         res = await self.gateway.api_post(endpoint='pin/add', session=session, params={'arg':cid, 
@@ -290,6 +279,7 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
 
     async def _cp(self,path1, path2):
         session = await self.set_session()
+
         res = await self.gateway.cp(session=session, arg=[path1, path2])
         return res
     cp = sync_wrapper(_cp)
@@ -310,6 +300,9 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         if not os.path.isfile(lpath): raise TypeError ('Use `put` to upload a directory')        
         if self.gateway_type == 'public': raise TypeError ('`put_file` and `put` functions require local/infura `gateway_type`')
         
+
+    
+
         params = {}
         params['wrap-with-directory'] = 'true' if wrap_with_directory else 'false'
         params['chunker'] = f'size-{chunker}'
@@ -320,16 +313,85 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         res = await self.gateway.api_post(endpoint='add', session=session,  params=params, data=data, headers=headers)
 
         res =  await res.json()
+        if rpath:
+
+            # await self._cp(path1=f'/ipfs/{res["Hash"]}', path2=rpath )
+            rdir = os.path.dirname(rpath)
+            # await self._mkdir(path=rdir, create_parents=True)
+
+            cid_hash = res["Hash"]
+
+            ipfs_path = f'/ipfs/{cid_hash}'
+
+            
+            await self._cp(ipfs_path, rpath)
+            # print(await self._exists(rpath),await self._size(rpath), await self._info(ipfs_path))
+            print(await self._exists(rpath), rpath)
+
+
 
         return res
         # return res
     
+    put_file = sync_wrapper(_put_file)
     @staticmethod
     async def data_gen_wrapper(data):
         for d in data:
             yield d
 
+    # async def _put(
+    #     self,
+    #     lpath,
+    #     rpath='/tmp',
+    #     recursive=False,
+    #     callback=_DEFAULT_CALLBACK,
+    #     batch_size=None,
+    #     **kwargs,
+    # ):
+    #     """Copy file(s) from local.
 
+    #     Copies a specific file or tree of files (if recursive=True). If rpath
+    #     ends with a "/", it will be assumed to be a directory, and target files
+    #     will go within.
+
+    #     The put_file method will be called concurrently on a batch of files. The
+    #     batch_size option can configure the amount of futures that can be executed
+    #     at the same time. If it is -1, then all the files will be uploaded concurrently.
+    #     The default can be set for this instance by passing "batch_size" in the
+    #     constructor, or for all instances by setting the "gather_batch_size" key
+    #     in ``fsspec.config.conf``, falling back to 1/8th of the system limit .
+    #     """
+    #     # from .implementations.local import LocalFileSystem, make_path_posix
+
+    #     rpath = self._strip_protocol(rpath)
+    #     if isinstance(lpath, str):
+    #         lpath = make_path_posix(lpath)
+    #     fs = LocalFileSystem()
+    #     lpaths = fs.expand_path(lpath, recursive=recursive)
+        
+        
+        
+    #     rpaths = other_paths(
+    #         lpaths, rpath, exists=isinstance(rpath, str) and await self._isdir(rpath)
+    #     )
+
+    #     is_dir = {l: os.path.isdir(l) for l in lpaths}
+    #     rdirs = [r for l, r in zip(lpaths, rpaths) if is_dir[l]]
+    #     file_pairs = [(l, r) for l, r in zip(lpaths, rpaths) if not is_dir[l]]
+
+    #     await asyncio.gather(*[self._makedirs(d, exist_ok=True) for d in rdirs])
+    #     batch_size = batch_size or self.batch_size
+
+    #     coros = []
+    #     callback.set_size(len(file_pairs))
+    #     for lfile, rfile in file_pairs:
+    #         callback.branch(lfile, rfile, kwargs)
+    #         coros.append(self._put_file(lfile, rfile, **kwargs))
+
+    #     return await _run_coros_in_chunks(
+    #         coros, batch_size=batch_size, callback=callback
+    #     )
+    # put = sync_wrapper(_put)
     async def _put(self,
         lpath=None, 
         rpath=None,
@@ -338,7 +400,7 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         chunker=262144, 
         return_json=True,
         return_cid = True,
-        wrap_with_directory=True,
+        wrap_with_directory=False,
         **kwargs
     ):
         
@@ -349,15 +411,11 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         if 'path' in kwargs:
             lpath = kwargs.pop('path')
 
-        if rpath[0] != '/' and len(rpath) > 1:
-            rpath = '/' + rpath 
-
         params = {}
         params['chunker'] = f'size-{chunker}'
         params['pin'] = 'true' if pin else 'false'
         params.update(kwargs)
         params['wrap-with-directory'] = 'true' if wrap_with_directory else 'false'
-
 
         assert os.path.exists(lpath), f'{lpath} does not exists'
         local_isdir = os.path.isdir(lpath)
@@ -385,38 +443,58 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         if pin and not rpath:
             rpath='/'
         if rpath:
+            rpath =  '/' + rpath.rstrip('/').lstrip('/') + '/'
+
+            cid_hash = res[-1]["Hash"]
+            ipfs_path = f'/ipfs/{cid_hash}'
             
             if  local_isdir:
-                await self._cp(path1=f'/ipfs/{res[-1]["Hash"]}', path2=rpath )
+                await self._cp(path1=f'/ipfs/{cid_hash}', path2=rpath )
             else:
-
-                cid_hash = res[-1]["Hash"]
-                ipfs_path = f'/ipfs/{cid_hash}'
+                
                 tmp_path = f'{rpath}/{cid_hash}'
                 rdir = os.path.dirname(tmp_path)
                 final_path = f'{rpath}/{os.path.basename(lpath)}'
+                
                 if not (await self._isdir(rdir)):
                     await self._mkdir(path=rdir)
 
-
-                if rdir[-1] != '/' and len(rdir) > 1:
-                    rdir = rdir + '/'
                 await self._cp(path1=ipfs_path, path2=rdir  )
-                ipfs_path = f'/{rpath}/{cid_hash}'
                 await self._cp(path1=tmp_path, path2=final_path )
                 await self._rm_file(ipfs_path)
         
         
         if return_cid:
             return res_hash
+
         return res
 
     put = sync_wrapper(_put)
 
 
-    async def _mkdir(self, path):
+    async def _mkdir(self, path, create_parents=True, **kwargs):
         session = await self.set_session()
+        if create_parents:
+            rdir_list = path.lstrip('/').rstrip('/').split('/')
+            current_r = '/'
+            for r in rdir_list:
+                current_r = os.path.join(current_r, r)
+                if not (await self._isdir(current_r)):
+                    await self._mkdir(path=current_r, create_parents=False)
+
         return await self.gateway.api_post(session=session, endpoint='files/mkdir', arg=path)
+
+
+    async def _makedirs(self, path, exist_ok=False):
+        if exist_ok:
+            if all(await asyncio.gather(self._exists(path), self._isdir(path))):
+                return path
+        await self._mkdir(path, create_parents=True)
+        # pass  # not necessary to implement, may not have directories
+
+
+
+
     async def _rm(self, path, recursive=False, batch_size=None, **kwargs):
         # TODO: implement on_error
         batch_size = batch_size or self.batch_size
@@ -485,6 +563,8 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
 
             else:
                 raise Exception(f'WTF, out is not suppose to be <1 , len: {len(out)}')
+    
+    
     async def _info(self, path, **kwargs):
         path = self._strip_protocol(path)
         session = await self.set_session()
@@ -494,6 +574,7 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
     def open(self, path, mode="rb",  block_size="default",autocommit=True,
                 cache_type="readahead", cache_options=None, size=None, **kwargs):
         
+
         return IPFSBufferedFile(
                             fs=self,
                             path=path,
@@ -561,7 +642,6 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
 
         if len(lpath.split('.')) == 1 and len(lpath) > 1 and lpath[-1] != '/' :
             lpath += '/'
-        from fsspec.implementations.local import make_path_posix
 
         rpath = self._strip_protocol(rpath)
         lpath = make_path_posix(lpath)
@@ -602,3 +682,266 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         return await _run_coros_in_chunks(
             coros, batch_size=batch_size, callback=callback
         )
+
+
+from fsspec.spec import  AbstractBufferedFile
+import io
+from fsspec.core import get_compression
+
+class IPFSBufferedFile(io.IOBase):
+    def __init__(
+        self, path, mode, autocommit=True, fs=None, compression=None, **kwargs
+    ):
+        self.path = path
+        self.mode = mode
+        self.fs = fs
+        self.f = None
+        self.autocommit = autocommit
+        self.compression = get_compression(path, compression)
+        self.blocksize = io.DEFAULT_BUFFER_SIZE
+        self._open()
+
+    def _open(self):
+        if self.f is None or self.f.closed:
+            if self.autocommit or "w" not in self.mode:
+                # self.temp = '/tmp'+self.path
+                self.temp = self.path
+                # os.makedirs(os.path.dirname(self.temp), exist_ok=True)
+                self.f = open(self.temp, mode=self.mode)
+                if self.compression:
+                    compress = compr[self.compression]
+                    self.f = compress(self.f, mode=self.mode)
+            else:
+                # TODO: check if path is writable?
+                i, name = tempfile.mkstemp()
+                os.close(i)  # we want normal open and normal buffered file
+                self.temp = name
+                self.f = open(name, mode=self.mode)
+            if "w" not in self.mode:
+                self.size = self.f.seek(0, 2)
+                self.f.seek(0)
+                self.f.size = self.size
+
+    def _fetch_range(self, start, end):
+        if self.__content is None:
+            self.__content = self.fs.cat_file(self.path)
+        content = self.__content[start:end]
+        if "b" not in self.mode:
+            return content.decode("utf-8")
+        else:
+            return content
+
+
+
+    def __setstate__(self, state):
+        self.f = None
+        loc = state.pop("loc", None)
+        self.__dict__.update(state)
+        if "r" in state["mode"]:
+            self.f = None
+            self._open()
+            self.f.seek(loc)
+
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        d.pop("f")
+        if "r" in self.mode:
+            d["loc"] = self.f.tell()
+        else:
+            if not self.f.closed:
+                raise ValueError("Cannot serialise open write-mode local file")
+        return d
+
+    def commit(self):
+        if self.autocommit:
+            raise RuntimeError("Can only commit if not already set to autocommit")
+        shutil.move(self.temp, self.path)
+
+    def discard(self):
+        # if self.autocommit:
+        #     raise RuntimeError("Cannot discard if set to autocommit")
+        os.remove(self.temp)
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return "r" not in self.mode
+
+    def read(self, *args, **kwargs):
+        return self.f.read(*args, **kwargs)
+
+    def write(self, *args, **kwargs):
+        return self.f.write(*args, **kwargs)
+
+    def tell(self, *args, **kwargs):
+        return self.f.tell(*args, **kwargs)
+
+    def seek(self, *args, **kwargs):
+        return self.f.seek(*args, **kwargs)
+
+    def seekable(self, *args, **kwargs):
+        return self.f.seekable(*args, **kwargs)
+
+    def readline(self, *args, **kwargs):
+        return self.f.readline(*args, **kwargs)
+
+    def readlines(self, *args, **kwargs):
+        return self.f.readlines(*args, **kwargs)
+
+    def close(self):
+        return self.f.close()
+
+    @property
+    def closed(self):
+        
+        return self.f.closed
+
+    def __fspath__(self):
+        # uniquely among fsspec implementations, this is a real, local path
+        return self.path
+
+    def __iter__(self):
+        return self.f.__iter__()
+
+    def __getattr__(self, item):
+        return getattr(self.f, item)
+
+    def __enter__(self):
+        self._incontext = True
+        return self
+
+
+
+    def write_temp_to_ipfs(self):
+        if 'w' in self.mode:
+            self.cid = self.fs.put(lpath=self.temp, rpath=os.path.dirname(self.path), recursive=True)
+            print(self.cid)
+        # self.discard()
+        
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        
+        self._incontext = False
+
+        self.write_temp_to_ipfs()
+        self.f.__exit__(exc_type, exc_value, traceback)
+
+
+
+
+
+if __name__ == '__main__':
+
+    import streamlit as st
+    import fsspec
+    from ipfsspec.asyn import AsyncIPFSFileSystem
+    from fsspec import register_implementation
+    from ipfsspec.utils import dict_equal, dict_hash
+    import asyncio
+    import io
+    import os
+    from datasets import load_dataset, Dataset
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    class fs:
+        ipfs = AsyncIPFSFileSystem()
+        local = fsspec.filesystem('file')
+
+    # dataset = load_dataset("glue", "mrpc", split="train")
+    # model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
+    # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+    # fs.ipfs.rm('/hf/bro/yo')
+    # st.write(deML.save_model(model=model, path='/hf/bro/yo'))
+
+    # st.write(fs.ipfs.ls('/hf/bro/yo'))
+
+    from transformers import AutoModel, AutoTokenizer
+    from datasets import load_dataset, Dataset
+
+    # dataset = load_dataset("glue", "mrpc", split="train")
+    # model = AutoModel.from_pretrained("bert-base-uncased")
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+
+    class deML:
+        tmp_root_path = '/tmp/deML'
+        fs = fs
+
+        @staticmethod
+        def get_tmp_path(path):
+            tmp_path = os.path.join(deML.tmp_root_path, path)
+            try:
+                fs.local.mkdir(tmp_path, create_parents=True)
+            except FileExistsError:
+                pass
+            
+            return tmp_path
+        
+        
+        @staticmethod
+        def save_model(model, path:str):
+
+            
+            # fs.ipfs.mkdir(path, create_parents=True)
+            
+            tmp_path = deML.get_tmp_path(path=path)
+            model.save_pretrained(tmp_path)
+            fs.ipfs.mkdirs(path)
+            
+            trial_count = 0
+            max_trials = 10
+            while trial_count<max_trials:
+                try:
+                    cid= fs.ipfs.put(lpath=tmp_path, rpath=path, recursive=True)
+                    break
+                except fsspec.exceptions.FSTimeoutError:
+                    trial_count += 1
+                    print(f'Failed {trial_count}/{max_trials}')
+                    
+            
+            fs.local.rm(tmp_path,  recursive=True)
+            
+            return cid
+            
+
+        @staticmethod
+        def load_model(path):
+            tmp_path = deML.get_tmp_path(path=path)
+            fs.ipfs.get(lpath=tmp_path, rpath=path )
+            model = AutoModel.from_pretrained(tmp_path)
+            fs.local.rm(tmp_path,  recursive=True)
+            
+            return model
+
+        @staticmethod
+        def save_dataset(dataset, path:str):
+            pass
+
+        @staticmethod
+        def load_dataset(path:str):
+            
+            pass
+    print(fs.ipfs.rm('/hf/bert/tokenizer/'))
+    cid = deML.save_model(model=tokenizer, path='/hf/bert/tokenizer')
+
+    print(fs.ipfs.ls('/hf/bert/tokenizer/'))
+
+
+
+    
+    # def encode(examples):
+    #     return tokenizer(examples["sentence1"], examples["sentence2"], truncation=True, padding="max_length")
+    # dataset = dataset.map(encode, batched=True)
+    # dataset = dataset.map(lambda examples: {"labels": examples["label"]}, batched=True)
+
+
+    # dataset.set_format(type="torch", columns=["input_ids", "token_type_ids", "attention_mask", "labels"])
+    # import torch
+    # dataloader = torch.utils.data.DataLoader(dataset, batch_size=1)
+
+    # model.save_pretrained(save_directory='/tmp')
+    # with torch.no_grad():
+    #     st.write(model(**next(iter(dataloader))))
+
