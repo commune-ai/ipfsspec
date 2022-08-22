@@ -3,82 +3,7 @@ import io
 from fsspec.core import get_compression
 
 
-class IPFSBufferedFile(AbstractBufferedFile):
-    def __init__(self, 
-                fs,
-                path,
-                mode="rb",
-                block_size="default",
-                autocommit=True,
-                cache_type="readahead",
-                cache_options=None,
-                size=None,
-                pin=False,
-                rpath=None,
-                **kwargs):
-        self.fs = fs
-        self.path = path
-        self._ensure_file_type()
-        super(IPFSBufferedFile, self).__init__(
-                fs,
-                path,
-                mode="rb",
-                block_size="default",
-                autocommit=True,
-                cache_type="readahead",
-                cache_options=None,
-                size=None, **kwargs)
-
-        self.pin = pin
-        self.rpath=rpath
-
-    def _fetch_range(self, start, end):
-        if self.__content is None:
-            self.__content = self.fs.cat_file(self.path)
-        content = self.__content[start:end]
-        if "b" not in self.mode:
-            return content.decode("utf-8")
-        else:
-            return content
-
-    def _upload_chunk(self, final=False):
-        """Write one part of a multi-block file upload
-
-        Parameters
-        ==========
-        final: bool
-            This is the last block, so should complete file, if
-            self.autocommit is True.
-        """
-        # may not yet have been initialized, may need to call _initialize_upload
-
-
-    def _ensure_file_type(self):
-        file_type = self.fs.info(self.path)['type']
-        assert file_type == 'file', f'Path must be "file" but is : "{file_type}"' 
-    def _upload_chunk(self, final=False):
-        self.local_tmp_f.write(self.buffer.read())
-        if force:
-            self.commit()
-        return not final
-    def commit(self):
-
-        self.local_tmp_f.close()
-        # put the local file into ipfs
-        self.fs.put(path=self.local_tmp_path)
-        # remove temp file
-        os.remove(self.temp)
-
-
-    def _initiate_upload(self):
-        # TODO: check if path is writable?
-        i, local_tmp_path = tempfile.mkstemp()
-        os.close(i)  # we want normal open and normal buffered file
-        self.local_tmp_path = local_tmp_path
-        self.local_tmp_f = open(local_tmp_path, mode=self.mode)
-
-
-class LocalFileOpener(io.IOBase):
+class IPFSBufferedFile(io.IOBase):
     def __init__(
         self, path, mode, autocommit=True, fs=None, compression=None, **kwargs
     ):
@@ -93,8 +18,13 @@ class LocalFileOpener(io.IOBase):
 
     def _open(self):
         if self.f is None or self.f.closed:
+
+
             if self.autocommit or "w" not in self.mode:
-                self.f = open(self.path, mode=self.mode)
+                # self.temp = '/tmp'+self.path
+                self.temp = self.path
+                # os.makedirs(os.path.dirname(self.temp), exist_ok=True)
+                self.f = open(self.temp, mode=self.mode)
                 if self.compression:
                     compress = compr[self.compression]
                     self.f = compress(self.f, mode=self.mode)
@@ -105,17 +35,19 @@ class LocalFileOpener(io.IOBase):
                 self.temp = name
                 self.f = open(name, mode=self.mode)
             if "w" not in self.mode:
-                self.size = self.f.seek(0, 2)
-                self.f.seek(0)
-                self.f.size = self.size
+                # self.size = self.f.seek(0, 2)
+                # self.f.seek(0)
+                # self.f.size = self.size
+                pass
 
     def _fetch_range(self, start, end):
-        # probably only used by cached FS
-        if "r" not in self.mode:
-            raise ValueError
-        self._open()
-        self.f.seek(start)
-        return self.f.read(end - start)
+        if self.__content is None:
+            self.__content = self.fs.cat_file(self.path)
+        content = self.__content[start:end]
+        if "b" not in self.mode:
+            return content.decode("utf-8")
+        else:
+            return content
 
     def __setstate__(self, state):
         self.f = None
@@ -142,8 +74,8 @@ class LocalFileOpener(io.IOBase):
         shutil.move(self.temp, self.path)
 
     def discard(self):
-        if self.autocommit:
-            raise RuntimeError("Cannot discard if set to autocommit")
+        # if self.autocommit:
+        #     raise RuntimeError("Cannot discard if set to autocommit")
         os.remove(self.temp)
 
     def readable(self) -> bool:
@@ -178,6 +110,7 @@ class LocalFileOpener(io.IOBase):
 
     @property
     def closed(self):
+        
         return self.f.closed
 
     def __fspath__(self):
@@ -194,8 +127,19 @@ class LocalFileOpener(io.IOBase):
         self._incontext = True
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._incontext = False
-        self.f.__exit__(exc_type, exc_value, traceback)
 
+
+    def flush_to_ipfs(self):
+        if 'w' in self.mode:
+            self.cid = self.fs.put(lpath=self.temp, rpath=os.path.dirname(self.path), recursive=True)
+            print(self.cid)
+        # self.discard()
+        
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        
+        self._incontext = False
+
+        self.flush_to_ipfs()
+        self.f.__exit__(exc_type, exc_value, traceback)
 
