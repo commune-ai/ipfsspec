@@ -55,7 +55,7 @@ class AsyncRequestSession: # this function is not used anywhere?
     async def close(self):
         pass
 
-IPFSHTTP_LOCAL_HOST = os.getenv('IPFSHTTP_LOCAL_HOST', '127.0.0.1')
+IPFSHTTP_LOCAL_HOST = os.getenv('IPFSHTTP_LOCAL_HOST')
 
 GATEWAY_MAP = {
     'local': [f"http://{IPFSHTTP_LOCAL_HOST}:8080"],
@@ -74,6 +74,7 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
     def __init__(self, asynchronous=False,
                  gateway_type='local',
                 loop=None, 
+                url = 'http://172.15.0.16:8080',
                 root = None,
                 client_kwargs={},
                  **storage_options):
@@ -81,6 +82,9 @@ class AsyncIPFSFileSystem(AsyncFileSystem):
         self._session = None
         self.client_kwargs=client_kwargs
         self.gateway = None
+
+        if url != None:
+            GATEWAY_MAP[gateway_type] = [url]
         self.change_gateway_type = gateway_type
 
         self.local_fs = AsyncFileSystem(loop=loop)
